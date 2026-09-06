@@ -230,7 +230,6 @@ async def reg_phone(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Регистрация успешно завершена! Добро пожаловать.", reply_markup=main_kb)
     
-    # Уведомление админу о новом пользователе
     st = settings()
     admin_chat = st.get("admin_chat_id")
     for admin in (admin_chat and [admin_chat] or ADMIN_IDS):
@@ -312,7 +311,9 @@ async def process_search(message: types.Message, state: FSMContext):
     found_results = []
     for brand, models in data.get("brands", {}).items():
         for model, faults in models.items():
-            if query in brand.lower() or query in model.lower():
+            if (query in brand.lower() or 
+                query in model.lower() or 
+                any(query in fault.lower() for fault in faults.keys())):
                 found_results.append((brand, model, faults))
 
     await state.clear()
@@ -435,7 +436,7 @@ async def process_block(message: types.Message, state: FSMContext):
     status_text = "заблокирован" if data['block_action'] == 1 else "разблокирован"
     await message.answer(f"✅ Клиент с ID {message.text} успешно {status_text}.", reply_markup=admin_kb)
 
-# CATCH-ALL (если пишут вне состояний)
+# CATCH-ALL
 @dp.message()
 async def catch_questions(message: types.Message, state: FSMContext):
     if message.text and not message.text.startswith('/') and await check_access(message, state):
