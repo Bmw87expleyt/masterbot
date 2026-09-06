@@ -311,9 +311,14 @@ async def process_search(message: types.Message, state: FSMContext):
     found_results = []
     for brand, models in data.get("brands", {}).items():
         for model, faults in models.items():
-            if (query in brand.lower() or 
-                query in model.lower() or 
-                any(query in fault.lower() for fault in faults.keys())):
+            match_brand = query in brand.lower()
+            match_model = query in model.lower()
+            match_fault = any(query in fault.lower() for fault in faults.keys())
+            
+            query_words = query.split()
+            match_words = all(word in brand.lower() or word in model.lower() or any(word in f.lower() for f in faults.keys()) for word in query_words)
+
+            if match_brand or match_model or match_fault or match_words:
                 found_results.append((brand, model, faults))
 
     await state.clear()
@@ -357,8 +362,8 @@ async def admin_add_text_start(message: types.Message, state: FSMContext):
     await state.set_state(AdminFlow.waiting_add_item)
     text = (
         "✍️ **Быстрое добавление:**\n\n"
-        "Отправьте данные через черточку `|`:\n"
-        "`Бренд | Модель | Услуга | Цена`\n\n"
+        "Отправьте данные через черточку `|` ИЛИ просто строкой:\n"
+        "`Samsung s22 ultra проц 6000`\n\n"
         "Пример:\n"
         "`iPhone | iPhone 15 | Контроллер питания | 7000`"
     )
@@ -371,14 +376,32 @@ async def admin_add_text_process(message: types.Message, state: FSMContext):
         await state.clear()
         return await message.answer("Отменено", reply_markup=admin_kb)
         
-    parts = [p.strip() for p in message.text.split("|")]
-    if len(parts) != 4:
-        return await message.answer("❌ Ошибка формата! Нужно ровно 4 параметра через `|`:\n`Бренд | Модель | Услуга | Цена`", parse_mode="Markdown")
+    text = message.text.strip()
+    
+    if "|" in text:
+        parts = [p.strip() for p in text.split("|")]
+        if len(parts) != 4:
+            return await message.answer("❌ Ошибка формата! Нужно ровно 4 параметра через `|`:\n`Бренд | Модель | Услуга | Цена`", parse_mode="Markdown")
+        brand, model, fault, price = parts
+    else:
+        words = text.split()
+        if len(words) < 4:
+            return await message.answer(
+                "❌ Слишком мало данных!\n"
+                "Пример правильного ввода:\n"
+                "<code>Samsung s22 ultra проц 6000</code>", 
+                parse_mode="HTML"
+            )
         
-    brand, model, fault, price = parts
+        brand = words[0]
+        price = words[-1]
+        middle_words = words[1:-1]
+        fault = middle_words[-1]
+        model = " ".join(middle_words[:-1])
+
     add_price_item(brand, model, fault, price)
     await state.clear()
-    await message.answer(f"✅ Успешно добавлено:\n{brand} {model} | {fault} — {price} ₽", reply_markup=admin_kb)
+    await message.answer(f"✅ Успешно добавлено в прайс:\nБренд: <b>{brand}</b>\nМодель: <b>{model}</b>\nУслуга: <b>{fault}</b>\nЦена: <b>{price} ₽</b>", reply_markup=admin_kb, parse_mode="HTML")
 
 @dp.message(F.document, F.from_user.id.in_(ADMIN_IDS))
 async def admin_import_excel(message: types.Message):
