@@ -33,12 +33,6 @@ ADMIN_IDS = {292170708}
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-MODELS_PER_PAGE = 10
-
-DEFAULT_BRANDS = [
-    "iPhone", "iPad", "Samsung", "Xiaomi", "Poco", 
-    "Honor/Huawei", "MacBook", "MacBook Air/Pro", "Nintendo/Steam Deck"
-]
 
 # ======================
 # DATABASE (SQLite)
@@ -87,13 +81,13 @@ def update_block_status(user_id: int, status: int):
 def get_all_users():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('SELECT user_id, full_name, phone, is_blocked FROM users')
+    cursor.execute('SELECT user_id, full_name, phone, is_blocked, joined_at FROM users')
     users = cursor.fetchall()
     conn.close()
     return users
 
 # ======================
-# DATA LOADERS & FIXERS
+# DATA LOADERS
 # ======================
 def load_json(path: str, default):
     if not os.path.exists(path): return default
@@ -104,17 +98,13 @@ def save_json(path: str, data):
 
 def settings():
     return load_json(SETTINGS_FILE, {
-        "contact_text": "🛠 Специлизированная лаборатория по компонентному ремонту и пайке плат.\nПринимаем устройства со всей РФ (СДЭК/Почта).",
+        "contact_text": "🛠 Специлизированная лаборатория по компонентному ремонту и пайке плат.\nПринимаем устройства со всей РФ.",
         "admin_chat_id": None
     })
 
 def prices():
     data = load_json(PRICES_FILE, {"brands": {}})
-    if "brands" not in data:
-        data["brands"] = {}
-    for b in DEFAULT_BRANDS:
-        if b not in data["brands"]:
-            data["brands"][b] = {}
+    if "brands" not in data: data["brands"] = {}
     return data
 
 def add_price_item(brand: str, model: str, fault: str, price: str):
@@ -133,16 +123,10 @@ def generate_excel_price(data: dict, filepath: str):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Прайс Пайка"
-    ws.append(["Бренд", "Модель / Устройство", "Вид работ / Услуга пайки", "Цена (руб)"])
+    ws.append(["Бренд", "Модель", "Услуга / Поломка", "Цена (руб)"])
     
     for brand, models in data.get("brands", {}).items():
-        if not models:
-            ws.append([brand, "Общие работы", "-", "-"])
-            continue
         for model, faults in models.items():
-            if not faults:
-                ws.append([brand, model, "-", "-"])
-                continue
             for fault, price in faults.items():
                 ws.append([brand, model, fault, str(price)])
                 
@@ -155,21 +139,17 @@ def parse_excel_to_json(filepath: str) -> dict:
     wb = openpyxl.load_workbook(filepath)
     ws = wb.active
     new_data = {"brands": {}}
-    for b in DEFAULT_BRANDS:
-        new_data["brands"][b] = {}
         
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row[0]: continue
+        if not row[0] or not row[1]: continue
         brand, model, fault, price = [str(x).strip() if x is not None else "" for x in row]
         
         if brand not in new_data["brands"]:
             new_data["brands"][brand] = {}
-            
-        if model and model != "-":
-            if model not in new_data["brands"][brand]:
-                new_data["brands"][brand][model] = {}
-            if fault and fault != "-":
-                new_data["brands"][brand][model][fault] = price
+        if model not in new_data["brands"][brand]:
+            new_data["brands"][brand][model] = {}
+        if fault:
+            new_data["brands"][brand][model][fault] = price
                 
     return new_data
 
@@ -178,7 +158,7 @@ def parse_excel_to_json(filepath: str) -> dict:
 # ======================
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="⚡️ Прайс и модели по пайке")],
+        [KeyboardButton(text="🔍 Найти модель / Прайс")],
         [KeyboardButton(text="📍 Контакты и доставка"), KeyboardButton(text="💬 Задать вопрос мастеру")]
     ],
     resize_keyboard=True,
@@ -199,31 +179,6 @@ admin_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-def brands_kb(brands_list: List[str]) -> InlineKeyboardMarkup:
-    rows = []
-    for i in range(0, len(brands_list), 2):
-        row = [InlineKeyboardButton(text=brands_list[i], callback_data=f"b:{i}")]
-        if i + 1 < len(brands_list):
-            row.append(InlineKeyboardButton(text=brands_list[i+1], callback_data=f"b:{i+1}"))
-        rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-def models_kb(brand_idx: int, models_list: List[str], page: int) -> InlineKeyboardMarkup:
-    rows = []
-    pages = max(1, (len(models_list) + MODELS_PER_PAGE - 1) // MODELS_PER_PAGE)
-    start = page * MODELS_PER_PAGE
-    
-    for i, model in enumerate(models_list[start:start + MODELS_PER_PAGE]):
-        rows.append([InlineKeyboardButton(text=model, callback_data=f"m:{brand_idx}:{start + i}")])
-        
-    nav = []
-    if page > 0: nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"p:{brand_idx}:{page-1}"))
-    if page < pages - 1: nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"p:{brand_idx}:{page+1}"))
-    if nav: rows.append(nav)
-    
-    rows.append([InlineKeyboardButton(text="🔙 К выбору бренда", callback_data="back_to_brands")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
 # ======================
 # FSM STATES
 # ======================
@@ -231,15 +186,18 @@ class RegFlow(StatesGroup):
     name = State()
     phone = State()
 
-class RequestFlow(StatesGroup):
-    waiting_comment = State()
+class SearchFlow(StatesGroup):
+    waiting_query = State()
+
+class QuestionFlow(StatesGroup):
+    waiting_text = State()
 
 class AdminFlow(StatesGroup):
     waiting_add_item = State()
     waiting_block_id = State()
 
 # ======================
-# MIDDLEWARE / AUTH
+# MIDDLEWARE / AUTH & REGISTRATION
 # ======================
 async def check_access(message: types.Message, state: FSMContext) -> bool:
     user = get_user(message.from_user.id)
@@ -250,18 +208,15 @@ async def check_access(message: types.Message, state: FSMContext) -> bool:
         return True
     else:
         await state.set_state(RegFlow.name)
-        await message.answer("Здравствуйте! 👋\nДля отправки заявок и расчёта стоимости укажите ваше **Имя**:", parse_mode="Markdown")
+        await message.answer("Здравствуйте! 👋\nДля доступа к боту и связи с мастером, пожалуйста, введите ваше **Имя**:", parse_mode="Markdown")
         return False
 
-# ======================
-# REGISTRATION
-# ======================
 @dp.message(RegFlow.name)
 async def reg_name(message: types.Message, state: FSMContext):
     if not message.text: return await message.answer("Пожалуйста, введите ваше имя текстом.")
     await state.update_data(full_name=message.text)
     await state.set_state(RegFlow.phone)
-    await message.answer(f"Приятно познакомиться, {message.text}!\nТеперь нажмите кнопку ниже, чтобы поделиться номером для связи.", reply_markup=phone_request_kb)
+    await message.answer(f"Приятно познакомиться, {message.text}!\nТеперь нажмите кнопку ниже, чтобы поделиться номером телефона.", reply_markup=phone_request_kb)
 
 @dp.message(RegFlow.phone)
 async def reg_phone(message: types.Message, state: FSMContext):
@@ -273,7 +228,19 @@ async def reg_phone(message: types.Message, state: FSMContext):
     add_user(u.id, u.username, data['full_name'], message.contact.phone_number)
     
     await state.clear()
-    await message.answer("✅ Регистрация завершена! Добро пожаловать.", reply_markup=main_kb)
+    await message.answer("✅ Регистрация успешно завершена! Добро пожаловать.", reply_markup=main_kb)
+    
+    # Уведомление админу о новом пользователе
+    st = settings()
+    admin_chat = st.get("admin_chat_id")
+    for admin in (admin_chat and [admin_chat] or ADMIN_IDS):
+        try:
+            await bot.send_message(
+                admin, 
+                f"👤 <b>Новый пользователь в боте:</b>\nИмя: {data['full_name']}\nТелефон: {message.contact.phone_number}\nID: `{u.id}`", 
+                parse_mode="HTML"
+            )
+        except: pass
 
 # ======================
 # CLIENT HANDLERS
@@ -282,7 +249,7 @@ async def reg_phone(message: types.Message, state: FSMContext):
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
     if await check_access(message, state):
-        await message.answer("Выберите нужный раздел:", reply_markup=main_kb)
+        await message.answer("Выберите нужный раздел или введите модель для поиска цен:", reply_markup=main_kb)
 
 @dp.message(F.text == "📍 Контакты и доставка")
 async def contacts(message: types.Message, state: FSMContext):
@@ -291,114 +258,81 @@ async def contacts(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "💬 Задать вопрос мастеру")
 @dp.message(Command("ask"))
-async def ask_question(message: types.Message, state: FSMContext):
+async def ask_question_start(message: types.Message, state: FSMContext):
     if not await check_access(message, state): return
+    await state.set_state(QuestionFlow.waiting_text)
+    await message.answer("✍️ Опишите вашу проблему с платой (устройство, симптомы, после чего сломалось). Мастер получит сообщение и ответит вам:", reply_markup=cancel_kb)
+
+@dp.message(QuestionFlow.waiting_text)
+async def ask_question_process(message: types.Message, state: FSMContext):
+    if not await check_access(message, state): return
+    db_user = get_user(message.from_user.id)
+    
+    admin_text = (
+        f"🚨 <b>Вопрос/Заявка от клиента!</b>\n\n"
+        f"👤 Клиент: {db_user[2]} (@{db_user[1]})\n"
+        f"📞 Телефон: {db_user[3]}\n"
+        f"🆔 ID: `{db_user[0]}`\n\n"
+        f"💬 Текст: {message.text}"
+    )
+    
+    st = settings()
+    admin_chat = st.get("admin_chat_id")
+    for admin in (admin_chat and [admin_chat] or ADMIN_IDS):
+        try: await bot.send_message(admin, admin_text, parse_mode="HTML")
+        except: pass
+        
     await state.clear()
-    await message.answer("Опишите вашу проблему с платой (марка, симптомы, после чего сломалось). Мастер ответит вам.", reply_markup=main_kb)
+    await message.answer("✅ Ваш вопрос успешно отправлен мастеру! Ожидайте ответа.", reply_markup=main_kb)
 
 @dp.message(F.text.in_(["Отмена", "⬅️ Выйти из админки"]))
 async def cancel_action(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Главное меню", reply_markup=main_kb)
 
-@dp.message(F.text == "⚡️ Прайс и модели по пайке")
-async def repair_start(message: types.Message, state: FSMContext):
+# ======================
+# SEARCH LOGIC (ПОИСК МОДЕЛИ)
+# ======================
+@dp.message(F.text == "🔍 Найти модель / Прайс")
+async def search_start(message: types.Message, state: FSMContext):
     if not await check_access(message, state): return
-    brands = list(prices().get("brands", {}).keys())
-    await message.answer("Выберите бренд устройства:", reply_markup=brands_kb(brands))
-
-@dp.callback_query(F.data == "back_to_brands")
-async def back_to_brands(cb: types.CallbackQuery):
-    brands = list(prices().get("brands", {}).keys())
-    await cb.message.edit_text("Выберите бренд устройства:", reply_markup=brands_kb(brands))
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("b:") | F.data.startswith("p:"))
-async def show_models(cb: types.CallbackQuery):
-    parts = cb.data.split(":")
-    brand_idx, page = int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
-    data = prices()
-    brands = list(data["brands"].keys())
-    
-    brand_name = brands[brand_idx]
-    models_list = list(data["brands"][brand_name].keys())
-    
-    if not models_list:
-        text = (
-            f"🔬 <b>Компонентный ремонт: {brand_name}</b>\n\n"
-            f"<i>Модели в прайсе пока не заполнены. Вы можете оставить общую заявку на пайку этой марки.</i>"
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✍️ Оставить заявку на ремонт платы", callback_data=f"req:{brand_idx}:UNIVERSAL")],
-            [InlineKeyboardButton(text="🔙 К выбору бренда", callback_data="back_to_brands")]
-        ])
-        await cb.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        return await cb.answer()
-        
-    await cb.message.edit_text(f"Бренд: <b>{brand_name}</b>\nВыберите модель:", reply_markup=models_kb(brand_idx, models_list, page), parse_mode="HTML")
-    await cb.answer()
-
-@dp.callback_query(F.data.startswith("m:"))
-async def show_faults(cb: types.CallbackQuery):
-    _, brand_idx, model_idx = cb.data.split(":")
-    data = prices()
-    brand_name = list(data["brands"].keys())[int(brand_idx)]
-    model_name = list(data["brands"][brand_name].keys())[int(model_idx)]
-    faults = data["brands"][brand_name][model_name]
-    
-    text = f"🔬 <b>Прайс на пайку: {brand_name} {model_name}</b>\n\n<b>Виды работ и цены:</b>\n"
-    if faults:
-        for fault, price in faults.items(): text += f"▪️ {fault} — {price} ₽\n"
-    else:
-        text += "<i>Цены индивидуальны, зависят от сложности дефекта платы.</i>\n"
-    text += "\n⚠️ <i>Диагностика платы бесплатная при согласии на ремонт.</i>"
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Записаться на ремонт платы", callback_data=f"req:{brand_idx}:{model_idx}")],
-        [InlineKeyboardButton(text="🔙 Назад к моделям", callback_data=f"b:{brand_idx}")]
-    ])
-    await cb.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await cb.answer()
-
-# ======================
-# REQUEST CREATION
-# ======================
-@dp.callback_query(F.data.startswith("req:"))
-async def request_start(cb: types.CallbackQuery, state: FSMContext):
-    _, brand_idx, model_idx = cb.data.split(":")
-    data = prices()
-    brand_name = list(data["brands"].keys())[int(brand_idx)]
-    
-    if model_idx == "UNIVERSAL":
-        model_str = f"{brand_name} (модель укажет клиент)"
-    else:
-        model_str = f"{brand_name} {list(data['brands'][brand_name].keys())[int(model_idx)]}"
-    
-    await state.update_data(req_model=model_str)
-    await state.set_state(RequestFlow.waiting_comment)
-    await cb.message.answer(f"📝 Устройство: <b>{model_str}</b>\n\nОпишите проблему с платой (например: не включается после воды, КЗ по линии питания, нет изображения):", reply_markup=cancel_kb, parse_mode="HTML")
-    await cb.answer()
-
-@dp.message(RequestFlow.waiting_comment)
-async def request_comment(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    db_user = get_user(message.from_user.id)
-    
-    admin_text = (
-        f"🚨 <b>Новая заявка на пайку/ремонт платы!</b>\n\n"
-        f"📱 Устройство: <b>{user_data['req_model']}</b>\n"
-        f"👤 Клиент: {db_user[2]} (@{db_user[1]})\n"
-        f"📞 Телефон: {db_user[3]}\n"
-        f"💬 Проблема: {message.text}"
+    await state.set_state(SearchFlow.waiting_query)
+    await message.answer(
+        "🔎 **Поиск по прайсу:**\n\nВведите название модели или бренда (например: `iPhone 15`, `Xiaomi`, `Poco X3`, `MacBook`):",
+        reply_markup=cancel_kb,
+        parse_mode="Markdown"
     )
+
+@dp.message(SearchFlow.waiting_query)
+async def process_search(message: types.Message, state: FSMContext):
+    if not await check_access(message, state): return
+    query = message.text.strip().lower()
+    data = prices()
     
-    st = settings()
-    for admin in (st.get("admin_chat_id") and [st.get("admin_chat_id")] or ADMIN_IDS):
-        try: await bot.send_message(admin, admin_text, parse_mode="HTML")
-        except: pass
-        
+    found_results = []
+    for brand, models in data.get("brands", {}).items():
+        for model, faults in models.items():
+            if query in brand.lower() or query in model.lower():
+                found_results.append((brand, model, faults))
+
     await state.clear()
-    await message.answer("✅ Заявка отправлена мастеру! С вами свяжутся для уточнения деталей.", reply_markup=main_kb)
+    if not found_results:
+        return await message.answer(
+            f"❌ По запросу «<b>{message.text}</b>» ничего не найдено в прайсе.\n\nВоспользуйтесь кнопкой «💬 Задать вопрос мастеру», чтобы уточнить стоимость.",
+            reply_markup=main_kb,
+            parse_mode="HTML"
+        )
+
+    for brand, model, faults in found_results[:5]:
+        text = f"📱 <b>{brand} {model}</b>\n\n<b>Прайс на услуги пайки:</b>\n"
+        if faults:
+            for fault, price in faults.items():
+                text += f"▪️ {fault} — {price} ₽\n"
+        else:
+            text += "<i>Цены индивидуальны после диагностики.</i>\n"
+        await message.answer(text, parse_mode="HTML")
+        
+    await message.answer("Главное меню:", reply_markup=main_kb)
 
 # ======================
 # ADMIN PANEL
@@ -414,20 +348,18 @@ async def admin_export_excel(message: types.Message):
     if message.from_user.id not in ADMIN_IDS: return
     filepath = os.path.join(BASE_DIR, "prices.xlsx")
     generate_excel_price(prices(), filepath)
-    await message.answer_document(FSInputFile(filepath), caption="📄 Прайс в формате Excel.\nОтредактируйте таблицу на компьютере и отправьте файл обратно в чат для обновления базы.")
+    await message.answer_document(FSInputFile(filepath), caption="📄 Прайс в формате Excel. Отредактируйте его и отправьте обратно для обновления.")
 
 @dp.message(F.text == "➕ Добавить услугу (Текстом)")
 async def admin_add_text_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
     await state.set_state(AdminFlow.waiting_add_item)
     text = (
-        "✍️ **Быстрое добавление позиции:**\n\n"
-        "Отправьте данные в одном сообщении через черточку `|` в формате:\n"
-        "`Бренд | Модель | Услуга / Поломка | Цена`\n\n"
+        "✍️ **Быстрое добавление:**\n\n"
+        "Отправьте данные через черточку `|`:\n"
+        "`Бренд | Модель | Услуга | Цена`\n\n"
         "Пример:\n"
-        "`iPhone | iPhone 13 Pro | Замена КП (контроллера питания) | 4500`\n"
-        "`MacBook | MacBook Pro A1706 | Восстановление после залития | 6000`\n\n"
-        "Введите данные или нажмите «Отмена»:"
+        "`iPhone | iPhone 15 | Контроллер питания | 7000`"
     )
     await message.answer(text, reply_markup=cancel_kb, parse_mode="Markdown")
 
@@ -445,23 +377,22 @@ async def admin_add_text_process(message: types.Message, state: FSMContext):
     brand, model, fault, price = parts
     add_price_item(brand, model, fault, price)
     await state.clear()
-    await message.answer(f"✅ Успешно добавлено в прайс:\nБренд: {brand} | Модель: {model} | {fault} — {price} ₽", reply_markup=admin_kb)
+    await message.answer(f"✅ Успешно добавлено:\n{brand} {model} | {fault} — {price} ₽", reply_markup=admin_kb)
 
 @dp.message(F.document, F.from_user.id.in_(ADMIN_IDS))
 async def admin_import_excel(message: types.Message):
     if not message.document.file_name.endswith('.xlsx'):
         return await message.answer("❌ Файл должен быть формата .xlsx")
     
-    file_id = message.document.file_id
     temp_path = os.path.join(BASE_DIR, "temp_prices.xlsx")
     await bot.download(message.document, destination=temp_path)
     
     try:
         new_json = parse_excel_to_json(temp_path)
         save_json(PRICES_FILE, new_json)
-        await message.answer("✅ База цен по пайке успешно обновлена из Excel-файла!")
+        await message.answer("✅ Прайс успешно обновлен из Excel!")
     except Exception as e:
-        await message.answer(f"❌ Ошибка обработки файла: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
     finally:
         if os.path.exists(temp_path): os.remove(temp_path)
 
@@ -471,11 +402,10 @@ async def admin_users_list(message: types.Message):
     users = get_all_users()
     if not users: return await message.answer("База клиентов пуста.")
     
-    text = "👥 <b>Список клиентов:</b>\n\n"
+    text = "👥 <b>База клиентов (посещения):</b>\n\n"
     for u in users:
-        status = "🔴 БАН" if u[3] else "🟢 Активен"
-        text += f"ID: `{u[0]}` | {u[1]} | {u[2]} | {status}\n"
-    
+        status = "🔴 БАН" if u[4] else "🟢 Активен"
+        text += f"ID: `{u[0]}` | {u[2]} | Тел: {u[3]} | {status}\n"
     for i in range(0, len(text), 4000):
         await message.answer(text[i:i+4000], parse_mode="HTML")
 
@@ -486,41 +416,39 @@ async def admin_block_menu(message: types.Message, state: FSMContext):
         [InlineKeyboardButton(text="Заблокировать", callback_data="adm_ban")],
         [InlineKeyboardButton(text="Разблокировать", callback_data="adm_unban")]
     ])
-    await message.answer("Выберите действие:", reply_markup=kb)
+    await message.answer("Выберите действие с клиентом:", reply_markup=kb)
 
 @dp.callback_query(F.data.in_(["adm_ban", "adm_unban"]))
 async def admin_block_action(cb: types.CallbackQuery, state: FSMContext):
     action = 1 if cb.data == "adm_ban" else 0
     await state.update_data(block_action=action)
     await state.set_state(AdminFlow.waiting_block_id)
-    await cb.message.edit_text("Введите **ID клиента**:", parse_mode="Markdown")
+    await cb.message.edit_text("Введите **ID клиента** (из базы клиентов):", parse_mode="Markdown")
     await cb.answer()
 
 @dp.message(AdminFlow.waiting_block_id)
 async def process_block(message: types.Message, state: FSMContext):
     if not message.text.isdigit(): return await message.answer("ID должен состоять только из цифр.")
-    
     data = await state.get_data()
-    action = data['block_action']
-    update_block_status(int(message.text), action)
-    
-    status = "заблокирован" if action == 1 else "разблокирован"
+    update_block_status(int(message.text), data['block_action'])
     await state.clear()
-    await message.answer(f"✅ Клиент с ID {message.text} {status}.", reply_markup=admin_kb)
+    status_text = "заблокирован" if data['block_action'] == 1 else "разблокирован"
+    await message.answer(f"✅ Клиент с ID {message.text} успешно {status_text}.", reply_markup=admin_kb)
 
-# CATCH-ALL FOR MESSAGES
+# CATCH-ALL (если пишут вне состояний)
 @dp.message()
 async def catch_questions(message: types.Message, state: FSMContext):
     if message.text and not message.text.startswith('/') and await check_access(message, state):
         db_user = get_user(message.from_user.id)
         st = settings()
-        text = f"❓ <b>Вопрос от клиента по пайке:</b>\n{db_user[2]} ({db_user[3]})\n\n{message.text}"
-        for admin in (st.get("admin_chat_id") and [st.get("admin_chat_id")] or ADMIN_IDS):
+        text = f"❓ <b>Сообщение от клиента:</b>\n{db_user[2]} ({db_user[3]})\n\n{message.text}"
+        admin_chat = st.get("admin_chat_id")
+        for admin in (admin_chat and [admin_chat] or ADMIN_IDS):
             try: await bot.send_message(admin, text, parse_mode="HTML")
             except: pass
 
 # ======================
-# STARTUP HOOK
+# STARTUP
 # ======================
 async def on_startup():
     init_db()
