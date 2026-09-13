@@ -117,7 +117,7 @@ def get_settings():
     return load_json(
         SETTINGS_FILE,
         {
-            "contact_text": "🛠 Специализированная лаборатория по компонентному ремонту и переклейке.\nПринимаем устройства лично и доставкой со всей РФ.",
+            "contact_text": "🛠 <b>Ultra Service</b> — профильная лаборатория по компонентному ремонту и пайке плат.\nПринимаем устройства лично и доставкой со всей РФ (СДЭК/Почта).",
             "admin_chat_id": None,
         },
     )
@@ -346,9 +346,13 @@ async def reg_phone(message: types.Message, state: FSMContext):
         u.id, u.username or "", data["full_name"], message.contact.phone_number
     )
     await state.clear()
-    await message.answer(
-        "✅ Регистрация пройдена.", reply_markup=main_kb
+    
+    welcome_text = (
+        f"Привет, {data['full_name']}! 👋\n\n"
+        "<b>Ultra Service</b> — профильная BGA-пайка и компонентный ремонт плат смартфонов.\n\n"
+        "Узнайте стоимость работ по прайсу или опишите неисправность мастеру напрямую 👇"
     )
+    await message.answer(welcome_text, reply_markup=main_kb, parse_mode="HTML")
 
     alert = (
         f"👤 <b>Новый пользователь:</b>\n"
@@ -370,7 +374,13 @@ async def reg_phone(message: types.Message, state: FSMContext):
 @dp.message(CommandStart())
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Главное меню:", reply_markup=main_kb)
+    name = message.from_user.first_name or "Клиент"
+    welcome_text = (
+        f"Привет, {name}! 👋\n\n"
+        "<b>Ultra Service</b> — профильная BGA-пайка и компонентный ремонт плат смартфонов.\n\n"
+        "Узнайте стоимость работ по прайсу или опишите неисправность мастеру напрямую 👇"
+    )
+    await message.answer(welcome_text, reply_markup=main_kb, parse_mode="HTML")
 
 
 @dp.message(F.text == "📍 Контакты и доставка")
@@ -451,7 +461,7 @@ async def ask_process(message: types.Message, state: FSMContext, db_user: tuple)
 async def search_init(message: types.Message, state: FSMContext):
     await state.set_state(SearchFlow.waiting_query)
     await message.answer(
-        "Введите модель (например, <code>iPhone 13</code> или <code>S22 Ultra</code>):",
+        "Введите модель (например, <code>iPhone 13</code> или <code>Poco X3 Pro</code>):",
         reply_markup=cancel_kb,
         parse_mode="HTML",
     )
@@ -506,7 +516,7 @@ async def admin_voice_add_start(message: types.Message, state: FSMContext):
         "Надиктуйте голосовое или напишите текстом в формате:\n"
         "<code>Бренд Модель Услуга Цена</code>\n\n"
         "Например:\n"
-        "<i>«Samsung S22 Ultra переклейка 6000»</i>",
+        "<i>«Poco X3 Pro проц 3500»</i>",
         reply_markup=cancel_kb,
         parse_mode="HTML",
     )
